@@ -1,0 +1,134 @@
+# 数据存储层完整分析
+
+系统共有 **6 张 MySQL 表** + **1 个内存数据结构**。
+
+---
+
+## 总览
+
+| 存储 | 系统内自动写入 | 需外部插入 | 系统内读取 |
+|------|:-:|:-:|:-:|
+| `users` | ❌ | ✅ | ✅ |
+| `user_telemetry_log` | ✅ | ❌ | ✅ |
+| `user_weekly_patterns` | ❌ | ✅ | ✅ |
+| `user_known_places` | ❌ | ✅ | ✅ |
+| `intervention_log` | ✅ | ❌ | ❌ |
+| `error_log` | ✅（未实现） | ❌ | ❌ |
+| 内存滑动窗口 `deque` | ✅ | ❌ | ✅ |
+
+---
+
+## 详细分析
+
+### 1. `users` — 🔴 需外部插入
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **INSERT** | ❌ 无链路写入 | — | 系统不会自动创建用户，**必须手动/外部插入** |
+| **SELECT** | Gateway | [persistence.py#get_user_age](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/gateway/services/persistence.py) | 每次 `/telemetry` 请求查 `birth_year` 算年龄 |
+| UPDATE/DELETE | ❌ 无 | — | — |
+
+> [!CAUTION]
+> 如果 `users` 表中没有对应的 `user_id`，Gateway 会将年龄默认为 30 岁继续运行，不会报错。
+
+---
+
+### 2. `user_telemetry_log` — ✅ 系统自动写入
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **INSERT** | Gateway | [persistence.py#persist_telemetry](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/gateway/services/persistence.py) | 每次 `/telemetry` 请求自动写入一条 |
+| **SELECT** (Gateway) | Gateway | [triage.py#evaluate_hard_triggers](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/gateway/services/triage.py) | 硬触发检查：`SELECT count WHERE recorded_at >= 最近30分钟` |
+| **SELECT** (MCP) | Patient History MCP | [patient_history_mcp.py](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/mcp_servers/patient_history_mcp.py) | 查过去 24h 的血糖历史 |
+| UPDATE/DELETE | ❌ 无 | — | 数据只增不改 |
+
+> [!NOTE]
+> 这是唯一一张由系统请求链路**自动写入**的业务数据表。数据来自 App 发送的 `/telemetry` 请求体。
+
+---
+
+### 3. `user_weekly_patterns` — 🔴 需外部插入
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **INSERT** | ❌ 无链路写入 | — | 系统不会自动生成行为模式，**必须手动/外部插入** |
+| **SELECT** (Gateway) | Gateway | [triage.py#_check_upcoming_activity](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/gateway/services/triage.py) | 软触发检查：当前时间 ±30min 内是否有高概率活动 |
+| **SELECT** (MCP) | Patient History MCP | [patient_history_mcp.py](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/mcp_servers/patient_history_mcp.py) | Investigator 获取运动预测 + 近期运动消耗数据 |
+| UPDATE/DELETE | ❌ 无 | — | — |
+
+> [!IMPORTANT]
+> 该表是**用户运动行为的统计聚合表**，在真实场景中应由一个离线统计任务（如每周 cron job）根据历史遥测数据计算填充。当前系统未实现此功能，测试时需**手动插入**。
+
+---
+
+### 4. `user_known_places` — 🔴 需外部插入
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **INSERT** | ❌ 无链路写入 | — | 系统不会自动学习地点，**必须手动/外部插入** |
+| **SELECT** | Location Context MCP | [location_context_mcp.py](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/mcp_servers/location_context_mcp.py) | 查用户所有已知地点，用 Haversine 算距离 |
+| UPDATE/DELETE | ❌ 无 | — | — |
+
+> [!NOTE]
+> 该表代表用户自定义的常去地点（家、健身房、公司等），在真实场景中应由 App 端让用户标注或自动聚类 GPS 轨迹。
+
+---
+
+### 5. `intervention_log` — ✅ 系统自动写入
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **INSERT** | Celery Worker (Communicator) | [communicator.py#_log_intervention](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/agent/nodes/communicator.py) | Agent 发送推送后记录干预日志 |
+| SELECT | ❌ 无 | — | 当前系统不读取干预历史（可用于后续分析） |
+| UPDATE/DELETE | ❌ 无 | — | — |
+
+写入内容包括：`trigger_type`, `agent_decision`（Reflector 的 JSON 推理结果）, `message_sent`（发给用户的消息）。
+
+---
+
+### 6. `error_log` — ⚠️ 系统设计有但未实现写入
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **INSERT** | ❌ 未实现 | — | spec 中规定外部调用失败时写入，但当前代码用 structlog 记日志，未写表 |
+| SELECT | ❌ 无 | — | — |
+
+> [!WARNING]
+> 当前所有错误处理都只通过 `structlog` 输出到终端/日志文件，没有写入 `error_log` 表。如需后续做错误监控面板，需要在各服务的 `except` 块中加入 INSERT。
+
+---
+
+### 7. 内存滑动窗口 (`collections.deque`) — ✅ 系统自动维护
+
+| 操作 | 来源 | 位置 | 说明 |
+|------|------|------|------|
+| **APPEND** | Gateway | [triage.py#evaluate_soft_triggers](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/gateway/services/triage.py) | 每次请求追加 [(timestamp, glucose, heart_rate)](file:///Users/juliawang/Desktop/%E6%85%A2%E6%80%A7%E7%97%85AIChallenge/diabetes-guardian/db/models.py#33-37) |
+| **READ** | Gateway | 同上 | 对窗口内数据做 `numpy.polyfit` 线性回归算斜率 |
+| **自动淘汰** | Python deque | `maxlen=20` | 超过 20 条自动丢弃最旧的 |
+
+```
+结构: dict[user_id] → deque(maxlen=20)
+每条: (timestamp: datetime, glucose: float, heart_rate: int)
+```
+
+**特性**：
+- 进程内存，Gateway **重启即清空**
+- 按 `user_id` 隔离，每个用户独立的窗口
+- 需≥3 条数据才能计算斜率
+
+---
+
+## 数据流向汇总图
+
+```
+外部插入 ──→ users
+外部插入 ──→ user_weekly_patterns
+外部插入 ──→ user_known_places
+
+POST /telemetry ──→ user_telemetry_log (Gateway 自动写)
+POST /telemetry ──→ 内存 deque (Gateway 自动维护)
+
+Agent Communicator ──→ intervention_log (Celery 自动写)
+
+(未实现) ──→ error_log
+```

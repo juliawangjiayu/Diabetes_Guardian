@@ -1,0 +1,208 @@
+# 系统运行分析 & 测试方案
+
+## 1. 系统整体数据流
+
+```mermaid
+sequenceDiagram
+    participant App as 📱 用户App
+    participant GW as Gateway :8000
+    participant DB as MySQL
+    participant Redis as Redis
+    participant Celery as Celery Worker
+    participant MCP1 as Patient History MCP :8001
+    participant MCP2 as Location Context MCP :8002
+    participant LLM as Gemini 2.0 Pro
+
+    App->>GW: POST /telemetry (JSON)
+    
+    Note over GW: 1. 查用户年龄
+    GW->>DB: SELECT birth_year FROM users
+    DB-->>GW: birth_year=1990 → age=36
+
+    Note over GW: 2. 并发：写库 + 判断触发
+    par 写入遥测数据
+        GW->>DB: INSERT INTO user_telemetry_log
+    and 判断硬触发
+        GW->>DB: SELECT count 最近30分钟记录
+        Note over GW: 检查三个硬条件
+    end
+
+    alt 硬触发命中
+        GW->>App: 🚨 紧急推送通知
+        GW-->>App: {"status":"received","trigger":"hard"}
+    else 硬触发未命中 → 评估软触发
+        Note over GW: 维护滑动窗口(deque)<br/>检查血糖斜率 + 运动预备
+        GW->>DB: SELECT FROM user_weekly_patterns
+        
+        alt 软触发命中
+            GW->>Redis: Celery send_task
+            Redis->>Celery: 取出任务
+            
+            par Celery调用两个MCP
+                Celery->>MCP1: POST /tools/get_patient_context
+                MCP1->>DB: 查24h血糖历史 + 周模式 + 运动消耗
+                MCP1-->>Celery: glucose_history + upcoming_activity
+            and
+                Celery->>MCP2: POST /tools/get_semantic_location
+                MCP2->>DB: 查 user_known_places + Haversine距离
+                MCP2-->>Celery: semantic_location
+            end
+            
+            Celery->>LLM: Reflector: 临床风险评估
+            LLM-->>Celery: {risk_level, intervention_action}
+            
+            alt intervention_action ≠ NO_ACTION
+                Celery->>LLM: Communicator: 生成推送文案
+                LLM-->>Celery: 个性化消息
+                Celery->>App: 📨 推送通知
+                Celery->>DB: INSERT INTO intervention_log
+            end
+            
+            GW-->>App: {"status":"received","trigger":"soft"}
+        else 软触发未命中
+            GW-->>App: {"status":"received"}
+        end
+    end
+```
+
+## 2. 各服务的数据依赖关系
+
+### Gateway API (:8000)
+
+| 操作 | 数据来源 | 说明 |
+|------|----------|------|
+| 获取用户年龄 | `users` 表 | 每次请求都查，用于心率阈值计算 |
+| 写入遥测记录 | `user_telemetry_log` 表 | 每次请求都写 |
+| 硬触发：数据中断检查 | `user_telemetry_log` 表 | 查最近30分钟有多少条记录 |
+| 软触发：血糖斜率 | **内存** (`deque` 滑动窗口) | 不查数据库，用内存中最近20条做回归 |
+| 软触发：运动预备 | `user_weekly_patterns` 表 | 查当前时间附近±30分钟的活动预测 |
+
+> [!IMPORTANT]
+> **血糖斜率触发**依赖的是 Gateway 进程内存中的滑动窗口，**不是数据库**。这意味着：
+> - Gateway 重启后，滑动窗口清空，需要重新积累数据
+> - 必须发送 **至少3条连续遥测**才能计算斜率
+> - 时间间隔要在 20 分钟内
+
+### Patient History MCP (:8001)
+
+| 操作 | 数据来源 | 说明 |
+|------|----------|------|
+| 24h 血糖历史 | `user_telemetry_log` 表 | SELECT 过去24小时的glucose记录 |
+| 运动预测 | `user_weekly_patterns` 表 | 查当前时间向后2小时内的活动概率 |
+| 近期运动消耗 | `user_weekly_patterns` 表 | 取最近5条 avg_glucose_drop |
+
+### Location Context MCP (:8002)
+
+| 操作 | 数据来源 | 说明 |
+|------|----------|------|
+| 语义位置解析 | `user_known_places` 表 | 查所有已知地点，Haversine 算距离 |
+
+---
+
+## 3. 三种场景的测试方案
+
+### 前置条件（数据库中需要的数据）
+
+已插入的测试数据：
+
+```sql
+-- ✅ 已有
+users:              user_001, birth_year=1990
+weekly_patterns:    user_001, day_of_week=0(周一), hour=17, resistance_training, p=0.85
+known_places:       user_001, 家(39.9042, 116.4074), 超级健身房(39.91, 116.41)
+```
+
+---
+
+### 场景 B：硬触发 ❌🚨
+
+**触发条件**：`glucose < 3.9 mmol/L`
+
+```bash
+curl -X POST http://127.0.0.1:8000/telemetry \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_001",
+    "timestamp": "2026-02-23T16:50:00",
+    "heart_rate": 75,
+    "glucose": 3.1,
+    "gps_lat": 39.9042,
+    "gps_lng": 116.4074
+  }'
+```
+
+**预期结果**：
+- 返回 `{"status":"received","trigger":"hard"}`
+- Gateway 日志显示 `hard_trigger_fired` + `emergency_alert_sent`
+- **不会**触发 Celery 任务
+- 数据写入 `user_telemetry_log`
+
+---
+
+### 场景 A：软触发 ⚠️
+
+**触发条件**：glucose 在 [4.0, 5.6] 且当前时间附近有高概率活动
+
+> [!WARNING]  
+> **时间敏感**：软触发的"运动预备"条件需要当前请求的时间与 `user_weekly_patterns` 中的 `hour_of_day` 匹配。我们插入的是 `hour=17`（下午5点），所以 timestamp 需要设在 **16:30~17:30 之间**才能命中。
+
+```bash
+curl -X POST http://127.0.0.1:8000/telemetry \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_001",
+    "timestamp": "2026-02-23T16:50:00",
+    "heart_rate": 75,
+    "glucose": 4.8,
+    "gps_lat": 39.9042,
+    "gps_lng": 116.4074
+  }'
+```
+
+**预期结果**：
+- 返回 `{"status":"received","trigger":"soft"}`
+- Gateway 日志显示 `soft_trigger_fired` (type=`SOFT_PRE_EXERCISE_LOW_BUFFER`)
+- Celery Worker 收到任务，日志显示 `agent_graph_starting`
+- Investigator 调用两个 MCP Server
+- Reflector 调用 Gemini API 做风险评估
+- Communicator 生成推送消息并写入 `intervention_log`
+
+---
+
+### 场景 C：无触发 ✅
+
+**条件**：glucose 安全，心率正常，无近期运动计划
+
+> [!NOTE]  
+> 为了确保不命中运动预备条件，timestamp 设在远离17点的时间（如上午10点）
+
+```bash
+curl -X POST http://127.0.0.1:8000/telemetry \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_001",
+    "timestamp": "2026-02-23T10:00:00",
+    "heart_rate": 80,
+    "glucose": 6.2,
+    "gps_lat": 39.9042,
+    "gps_lng": 116.4074
+  }'
+```
+
+**预期结果**：
+- 返回 `{"status":"received"}` （无 trigger 字段）
+- 无 emergency alert，无 Celery 任务
+- 数据仍会写入 `user_telemetry_log`
+
+---
+
+## 4. 测试执行顺序建议
+
+| 顺序 | 场景 | 原因 |
+|------|------|------|
+| 1 | 场景 C (无触发) | 最简单，先验证基本链路通畅 |
+| 2 | 场景 B (硬触发) | 只走 Gateway 层，不需要 Celery/MCP |
+| 3 | 场景 A (软触发) | 全链路测试，依赖所有服务 |
+
+> [!TIP]
+> 测试时建议观察 Gateway 和 Celery Worker 的终端日志输出，可以看到完整的处理过程。
