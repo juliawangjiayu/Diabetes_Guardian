@@ -1,85 +1,86 @@
 """
 tests/fixtures.py
 
-Shared test data and helper functions for constructing test payloads.
-All tests must use these fixtures instead of hardcoding test values.
+Shared test fixtures for all test modules.
 """
 
-from datetime import datetime
-
-from gateway.schemas import InvestigationTask, TelemetryPayload
+from datetime import datetime, time, timedelta
 
 
-def build_telemetry(
+def make_cgm_payload(
     user_id: str = "user_001",
-    timestamp: datetime | None = None,
-    heart_rate: int = 75,
     glucose: float = 5.5,
-    gps_lat: float = 39.9042,
-    gps_lng: float = 116.4074,
-) -> TelemetryPayload:
-    """Build a TelemetryPayload with sensible defaults for testing."""
-    return TelemetryPayload(
-        user_id=user_id,
-        timestamp=timestamp or datetime(2024, 6, 15, 13, 30, 0),
-        heart_rate=heart_rate,
-        glucose=glucose,
-        gps_lat=gps_lat,
-        gps_lng=gps_lng,
-    )
-
-
-def build_investigation_task(
-    user_id: str = "user_001",
-    trigger_type: str = "SOFT_PRE_EXERCISE_LOW_BUFFER",
-    glucose: float = 4.8,
-    heart_rate: int = 75,
-) -> InvestigationTask:
-    """Build an InvestigationTask with sensible defaults for testing."""
-    return InvestigationTask(
-        user_id=user_id,
-        trigger_type=trigger_type,
-        trigger_at=datetime(2024, 6, 15, 13, 30, 0),
-        current_glucose=glucose,
-        current_hr=heart_rate,
-        gps_lat=39.9042,
-        gps_lng=116.4074,
-        context_notes="Test investigation task",
-    )
-
-
-def build_initial_state(
-    user_id: str = "user_001",
-    trigger_type: str = "SOFT_PRE_EXERCISE_LOW_BUFFER",
-    glucose: float = 4.8,
-    heart_rate: int = 75,
+    recorded_at: datetime | None = None,
 ) -> dict:
-    """Build an initial AgentState dict for LangGraph testing."""
     return {
-        "task": {
-            "user_id": user_id,
-            "trigger_type": trigger_type,
-            "trigger_at": "2024-06-15T13:30:00",
-            "current_glucose": glucose,
-            "current_hr": heart_rate,
-            "gps_lat": 39.9042,
-            "gps_lng": 116.4074,
-            "context_notes": "Test state",
-        },
         "user_id": user_id,
-        "location_context": None,
-        "glucose_history_24h": None,
-        "upcoming_activity": None,
-        "recent_exercise_glucose_drops": None,
-        "risk_level": None,
-        "reasoning_summary": None,
-        "intervention_action": None,
-        "message_to_user": None,
-        "notification_sent": False,
+        "recorded_at": (recorded_at or datetime.now()).isoformat(),
+        "glucose": glucose,
     }
 
 
-# ── Test user profile ───────────────────────────────────────
+def make_hr_payload(
+    user_id: str = "user_001",
+    heart_rate: int = 75,
+    recorded_at: datetime | None = None,
+    gps_lat: float = 1.3521,
+    gps_lng: float = 103.8198,
+) -> dict:
+    return {
+        "user_id": user_id,
+        "recorded_at": (recorded_at or datetime.now()).isoformat(),
+        "heart_rate": heart_rate,
+        "gps_lat": gps_lat,
+        "gps_lng": gps_lng,
+    }
 
-TEST_USER_BIRTH_YEAR: int = 1990
-TEST_USER_AGE: int = 34
+
+def make_exercise_payload(
+    user_id: str = "user_001",
+    exercise_type: str = "resistance_training",
+    started_at: datetime | None = None,
+    ended_at: datetime | None = None,
+) -> dict:
+    start = started_at or datetime.now()
+    end = ended_at or (start + timedelta(hours=1, minutes=30))
+    return {
+        "user_id": user_id,
+        "exercise_type": exercise_type,
+        "started_at": start.isoformat(),
+        "ended_at": end.isoformat(),
+        "avg_heart_rate": 145,
+        "calories_burned": 420.0,
+    }
+
+
+def make_mental_health_alert(
+    user_id: str = "user_001",
+    emotion_label: str = "anxious",
+) -> dict:
+    return {
+        "user_id": user_id,
+        "emotion_label": emotion_label,
+        "source": "meralion",
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+# Demo user profile
+DEMO_USER = {
+    "user_id": "user_001",
+    "name": "Demo User",
+    "birth_year": 1990,
+    "gender": "male",
+    "weight_kg": 78.0,
+    "height_cm": 175.0,
+    "waist_cm": 85.0,
+}
+
+# Weekly pattern for Saturday resistance training at 14:00
+DEMO_WEEKLY_PATTERN = {
+    "user_id": "user_001",
+    "day_of_week": 5,  # Saturday
+    "start_time": time(14, 0),
+    "end_time": time(15, 30),
+    "activity_type": "resistance_training",
+}

@@ -1,8 +1,8 @@
 """
 agent/state.py
 
-AgentState TypedDict definition for the LangGraph workflow.
-Fields are append-only: existing field names and types must not be changed.
+LangGraph AgentState definition.
+Fields are only-append: existing field names and types must never be modified.
 New fields must be Optional with default None.
 """
 
@@ -10,23 +10,30 @@ from typing import Optional, TypedDict
 
 
 class AgentState(TypedDict):
-    """Shared state passed through the LangGraph node pipeline."""
-
-    # ── Input (set by Celery task) ───────────────────────────
+    # ── Input (from InvestigationTask) ──────────────────────
     task: dict
     user_id: str
 
-    # ── Investigator outputs ─────────────────────────────────
+    # ── Investigator fills (pure data fetch, no computation) ─
     location_context: Optional[str]
     glucose_history_24h: Optional[list]
     upcoming_activity: Optional[dict]
-    recent_exercise_glucose_drops: Optional[list[float]]
+    exercise_history: Optional[list]
+    user_profile: Optional[dict]
+    today_calories_burned: Optional[float]
+    emotion_context: Optional[dict]
+    glucose_daily_stats: Optional[dict]
+    glucose_weekly_profile: Optional[dict]
 
-    # ── Reflector outputs ────────────────────────────────────
-    risk_level: Optional[str]  # "LOW" | "MEDIUM" | "HIGH"
+    # ── Reflector fills (LLM reasoning + drop calculation) ──
+    estimated_glucose_drop: Optional[float]
+    risk_level: Optional[str]
     reasoning_summary: Optional[str]
-    intervention_action: Optional[str]  # "NO_ACTION" | "SOFT_REMIND" | "STRONG_ALERT"
+    projected_glucose: Optional[float]
+    intervention_action: Optional[str]
+    supplement_recommendation: Optional[str]
+    reflector_confidence: Optional[str]
 
-    # ── Communicator outputs ─────────────────────────────────
+    # ── Communicator fills ───────────────────────────────────
     message_to_user: Optional[str]
     notification_sent: bool

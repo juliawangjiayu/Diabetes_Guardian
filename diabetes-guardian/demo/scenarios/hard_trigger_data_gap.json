@@ -1,0 +1,13 @@
+{
+  "scenario_id": "hard_trigger_data_gap",
+  "description": "Hard trigger: No CGM data for > 60 minutes. Uses POST /test/check-data-gap (DEMO_MODE=true required)",
+  "prerequisite": "DEMO_MODE=true; no CGM records for the user in the past 60 minutes; emergency contact with notify_on containing 'data_gap'",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /test/check-data-gap",
+      "body": {}
+    }
+  ],
+  "expected_outcome": "HARD_TRIGGER → EmergencyService.fire → App push + SMS + Twilio call"
+}

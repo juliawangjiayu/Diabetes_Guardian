@@ -1,0 +1,18 @@
+{
+  "scenario_id": "no_trigger",
+  "description": "Normal readings: glucose in safe range, normal HR, no upcoming activity window",
+  "prerequisite": "None. Should NOT trigger any alerts.",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/hr",
+      "body": {"heart_rate": 78, "gps_lat": 1.3521, "gps_lng": 103.8198}
+    },
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/cgm",
+      "body": {"glucose": 6.5}
+    }
+  ],
+  "expected_outcome": "No trigger fired. No notifications. No new intervention_log records."
+}

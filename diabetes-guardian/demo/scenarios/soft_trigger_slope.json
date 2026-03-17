@@ -1,0 +1,28 @@
+{
+  "scenario_id": "soft_trigger_slope",
+  "description": "Soft trigger: Rapid glucose slope |slope| > 0.11 mmol/L/min from 3 consecutive readings",
+  "prerequisite": "User profile exists; DEMO_MODE=true recommended for time alignment",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/hr",
+      "body": {"heart_rate": 75, "gps_lat": 1.3521, "gps_lng": 103.8198}
+    },
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/cgm",
+      "body": {"glucose": 7.9}
+    },
+    {
+      "offset_minutes": 10,
+      "endpoint": "POST /telemetry/cgm",
+      "body": {"glucose": 6.9}
+    },
+    {
+      "offset_minutes": 20,
+      "endpoint": "POST /telemetry/cgm",
+      "body": {"glucose": 5.1}
+    }
+  ],
+  "expected_outcome": "SOFT_TRIGGER (SOFT_RAPID_SLOPE) → Agent → Reflector → Communicator push notification"
+}

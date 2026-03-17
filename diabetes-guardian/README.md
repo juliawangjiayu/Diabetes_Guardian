@@ -1,89 +1,115 @@
-# 糖尿病智能监护系统 (Diabetes Guardian)
+# Diabetes Guardian
 
-基于 FastAPI + LangGraph + Celery 的实时糖尿病监护 Agent 系统。
+Diabetes Guardian is a real-time monitoring and trigger-based intervention system for diabetes patients. It ingests continuous glucose monitor (CGM) and heart rate (HR) logs, evaluates critical thresholds ("Hard Triggers") or trends ("Soft Triggers"), and coordinates emergency responses or automated advice using a LangGraph-based AI Agent.
 
-## 快速开始
+---
 
-### 前置要求
+## 🏗️ Architecture
 
-- Python 3.11+
-- MySQL 8.0+
-- Redis 7+
-- uv (Python 虚拟环境管理)
+The system is designed with a layered monolithic architecture:
 
-### 安装
+*   **`gateway/` (FastAPI)**: Receives telemetry data (CGM, HR), checks "Hard Triggers" (e.g., critical low glucose), and dispatches heavier "Soft Trigger" analysis task logs to Celery.
+*   **`agent/` (Celery + LangGraph)**: Executes an asynchronous worker dealing with Soft Triggers (e.g., pre-exercise glucose drops). It orchestrates a LangGraph reasoning workflow querying historical state and triggering LLM advice generation (via Gemini).
+*   **`db/` Structure**: Uses PostgreSQL holding timeseries logs (CGM, HR), Static configurations (User Profile, Emergency Contacts, Weekly Patterns), and logging responses (Intervention updates).
+*   **`frontend/` (React + Vite)**: Visual testing dashboard to track thresholds and simulate trigger events.
 
+---
+
+## 📋 Prerequisites
+
+*   **Python**: 3.10+
+*   **Node.js**: 18+ & npm
+*   **Database**: PostgreSQL
+*   **Cache Queue**: Redis
+
+---
+
+## 🛠️ Installation & Setup
+
+### 1. Backend Environment Setup
+
+1.  Clone the repository and anchor into the project root.
+2.  Create and activate a virtual environment (`python -m venv venv && source venv/bin/activate`).
+3.  Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+4.  Create a `.env` file (copying `.env.example`) and configure:
+    *   **PostgreSQL**: `pg_host`, `pg_port`, `pg_user`, `pg_password`, `pg_db`.
+    *   **Redis**: `redis_url` (usually `redis://127.0.0.1:6379/0`).
+    *   **Gemini AI**: `gemini_api_key` for Langchain reasoning.
+    *   **Twilio** (Optional): For emergency voice alerts.
+
+### 2. Database Initialization
+
+Run the initialization script on your PostgreSQL server:
 ```bash
-# 创建并激活虚拟环境
-uv venv
-source .venv/bin/activate
-
-# 安装依赖
-uv pip install -r requirements.txt
-
-# 复制并编辑环境变量
-cp .env.example .env
-# 编辑 .env 填入你的配置
-
-# 初始化数据库
-mysql -u guardian -p diabetes_guardian < db/init.sql
+# Example assuming user guardian on db diabetes_guardian
+psql -U guardian -d diabetes_guardian -f db/init.sql
 ```
 
-### 启动服务
+### 3. Demo Data Seeding (Optional but Recommended for Testing)
 
-每个服务需要单独开一个终端，先激活虚拟环境 `source .venv/bin/activate`：
-
+Create a 7-day historical background profile to test soft trigger features:
 ```bash
-# 终端 1: Patient History MCP Server
-uvicorn mcp_servers.patient_history_mcp:app --host 127.0.0.1 --port 8001 --reload
+# Seed user profiles & 7-day logs
+python demo/seed_demo.py --user_id user_001
 
-# 终端 2: Location Context MCP Server
-uvicorn mcp_servers.location_context_mcp:app --host 127.0.0.1 --port 8002 --reload
+# Calculate backfill analytics for the seeded data
+python pipeline/run.py --backfill --user_id user_001
+```
 
-# 终端 3: Celery Worker
+### 4. Frontend Installation
+
+Navigate to the frontend directory and install dependencies:
+```bash
+cd frontend
+npm install
+```
+
+---
+
+## 🚀 Running the Application Stack
+
+You must run the following components concurrently during local testing:
+
+### 1. Start the Gateway (FastAPI)
+```bash
+# From project root
+uvicorn gateway.main:app --reload
+```
+Runs at `http://127.0.0.1:8000`.
+
+### 2. Start the Agent Worker (Celery)
+Make sure your Redis server is online.
+```bash
+# From project root
 celery -A agent.main worker --loglevel=info
-
-# 终端 4: Gateway API
-uvicorn gateway.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 测试
-
+### 3. Start the Frontend Dashboard
 ```bash
-# 发送测试遥测数据
-curl -X POST http://127.0.0.1:8000/telemetry \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "user_001",
-    "timestamp": "2024-06-15T13:30:00",
-    "heart_rate": 75,
-    "glucose": 4.8,
-    "gps_lat": 39.9042,
-    "gps_lng": 116.4074
-  }'
-
-# 运行单元测试
-pytest tests/ -v
+cd frontend
+npm run dev
 ```
+By default, the Vite server starts on `http://localhost:5173`.
 
-## 技术栈
+---
 
-| 组件 | 技术 |
-|------|------|
-| Web 框架 | FastAPI |
-| Agent 编排 | LangGraph |
-| 任务队列 | Celery + Redis |
-| 数据库 | MySQL (SQLAlchemy 2.0 async) |
-| LLM | Gemini 2.0 Pro (langchain-google-genai) |
-| 日志 | structlog |
+## 🖥️ Testing & Visualization
 
-## 项目结构
+Open `http://localhost:5173` in your browser to access the **Diabetes Guardian Test Dashboard**.
 
-```
-diabetes-guardian/
-├── gateway/          # 流处理与规则网关层
-├── agent/            # 认知与调度层（LangGraph）
-├── mcp_servers/      # 基建层 MCP Servers
-├── db/               # 数据库 Schema 与 ORM
-└── tests/            # 测试
-```
+### 1. User Profile
+*   Configure the patient core metrics (Weight, Height).
+*   Add Recurring **Weekly Activity Patterns** (e.g., Saturday 14:00 Resistance Training) to test pre-exercise heuristics.
+*   Edit **Emergency Contacts** specifying which trigger types should dispatch notifications.
+
+### 2. Manual Data Injector
+*   Inject synthetic discrete entries (CGM readings, Heart Rate, Emotion logs).
+*   Use this to verify threshold boundaries manually (e.g., punching in continuous logs dropping beneath standard `GLUCOSE_HARD_LOW`).
+
+### 3. Scenario Player (Ideal full flow verification)
+*   Drop or select Scenario JSON files (like loaded `soft_trigger_slope.json`).
+*   Click **Run Scenario** to stream high frequency historical readings sequentially simulating telemetry gaps or rapid trigger events.
+*   Watch real-time notifications, state transition logs, and advice triggers generated by the AI Agent.

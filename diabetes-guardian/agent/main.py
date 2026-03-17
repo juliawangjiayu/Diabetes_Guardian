@@ -1,9 +1,17 @@
 """
 agent/main.py
 
-Celery Worker entry point.
-Defines the Celery app and the investigation task that drives the LangGraph agent.
+Celery Worker entry point for the agent layer.
+Receives investigation tasks from Redis queue and runs the LangGraph workflow.
+
+Start with: celery -A agent.main worker --loglevel=info
 """
+
+import os
+import sys
+
+# Ensure project root is in sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
 import json
@@ -15,62 +23,65 @@ from config import settings
 
 logger = structlog.get_logger(__name__)
 
-celery_app = Celery(
-    "agent",
-    broker=settings.redis_url,
-    backend=settings.redis_url,
-)
-
+celery_app = Celery("diabetes_guardian", broker=settings.redis_url)
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
-    timezone="Asia/Shanghai",
-    enable_utc=True,
 )
-
-
-async def _run_graph(task_json: str) -> None:
-    """Async entrypoint that builds and invokes the LangGraph workflow."""
-    from agent.graph import build_graph
-
-    task_data = json.loads(task_json)
-    user_id = task_data["user_id"]
-
-    logger.info("agent_graph_starting", user_id=user_id, trigger_type=task_data.get("trigger_type"))
-
-    initial_state = {
-        "task": task_data,
-        "user_id": user_id,
-        "location_context": None,
-        "glucose_history_24h": None,
-        "upcoming_activity": None,
-        "recent_exercise_glucose_drops": None,
-        "risk_level": None,
-        "reasoning_summary": None,
-        "intervention_action": None,
-        "message_to_user": None,
-        "notification_sent": False,
-    }
-
-    graph = build_graph()
-    final_state = await graph.ainvoke(initial_state)
-
-    logger.info(
-        "agent_graph_complete",
-        user_id=user_id,
-        risk_level=final_state.get("risk_level"),
-        intervention_action=final_state.get("intervention_action"),
-        notification_sent=final_state.get("notification_sent"),
-    )
 
 
 @celery_app.task(name="agent.tasks.run_investigation")
 def run_investigation(task_json: str) -> None:
-    """
-    Celery task that drives the LangGraph agent workflow.
-
-    Uses asyncio.run() to bridge Celery's sync interface with async graph execution,
-    per agent.md Section 3.2.
-    """
+    """Celery task that drives the async LangGraph workflow."""
     asyncio.run(_run_graph(task_json))
+
+
+async def _run_graph(task_json: str) -> None:
+    """Parse InvestigationTask and invoke the compiled LangGraph."""
+    from agent.graph import build_graph
+    from db.session import engine
+
+    # Dispose inherited engine pool to bind to the current event loop
+    await engine.dispose()
+
+    try:
+        task = json.loads(task_json)
+        graph = build_graph()
+
+        initial_state = {
+            "task": task,
+            "user_id": task["user_id"],
+            "location_context": None,
+            "glucose_history_24h": None,
+            "upcoming_activity": None,
+            "exercise_history": None,
+            "user_profile": None,
+            "today_calories_burned": None,
+            "emotion_context": None,
+            "glucose_daily_stats": None,
+            "glucose_weekly_profile": None,
+            "estimated_glucose_drop": None,
+            "risk_level": None,
+            "reasoning_summary": None,
+            "projected_glucose": None,
+            "intervention_action": None,
+            "supplement_recommendation": None,
+            "reflector_confidence": None,
+            "message_to_user": None,
+            "notification_sent": False,
+        }
+
+        logger.info("graph_started", user_id=task["user_id"], trigger_type=task["trigger_type"])
+
+        result = await graph.ainvoke(initial_state)
+
+        logger.info(
+            "graph_completed",
+            user_id=task["user_id"],
+            intervention_action=result.get("intervention_action"),
+            notification_sent=result.get("notification_sent"),
+        )
+    finally:
+        # Dispose again before loop closes to prevent RuntimeError: Event loop is closed
+        await engine.dispose()

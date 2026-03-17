@@ -1,0 +1,23 @@
+{
+  "scenario_id": "soft_trigger_reflector_reject",
+  "description": "Rapid glucose rise triggers soft trigger slope evaluation, but Reflector dismisses natively due to safe absolute status targets.",
+  "prerequisite": "Continuous rising readings fire slope thresholds triggers natively.",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/cgm",
+      "body": { "glucose": 5.0 }
+    },
+    {
+      "offset_minutes": 10,
+      "endpoint": "POST /telemetry/cgm",
+      "body": { "glucose": 6.5 }
+    },
+    {
+      "offset_minutes": 20,
+      "endpoint": "POST /telemetry/cgm",
+      "body": { "glucose": 7.5 }
+    }
+  ],
+  "expected_outcome": "SOFT_TRIGGER (RAPID_SLOPE) → Investigator → Reflector (decision: NO_ACTION) → Stop & Log natively via genuine reasoning summaries outputs."
+}

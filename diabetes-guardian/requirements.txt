@@ -1,40 +1,42 @@
 # Web framework
-fastapi>=0.111.0
-uvicorn[standard]>=0.30.1
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
 
 # Data validation
-pydantic>=2.7.4
-pydantic-settings>=2.3.1
+pydantic==2.7.4
+pydantic-settings==2.3.1
 
 # Database
-sqlalchemy>=2.0.30
-aiomysql>=0.2.0
-pymysql>=1.1.1
+sqlalchemy==2.0.30
+asyncpg==0.30.0
+psycopg2-binary==2.9.9
 
 # Task queue
-celery>=5.4.0
-redis>=5.0.6
+celery==5.4.0
+redis==5.0.6
+
+# Data pipeline scheduler (independent of Celery)
+apscheduler==3.10.4
 
 # LangGraph & LangChain
-langgraph>=0.1.19
-langchain>=0.2.5
-langchain-google-genai>=1.0.6
+langgraph==0.1.19
+langchain==0.2.5
+langchain-google-genai==1.0.6
 
 # HTTP client (inter-service calls)
-httpx>=0.27.0
+httpx==0.27.0
 
 # Logging
-structlog>=24.2.0
+structlog==24.2.0
 
 # Utilities
-python-dotenv>=1.0.1
-numpy>=1.26.4
+python-dotenv==1.0.1
+numpy==1.26.4
+
+# Twilio (emergency voice calls)
+twilio==9.0.5
 
 # Testing
-pytest>=8.2.2
-pytest-asyncio>=0.23.7
-pytest-mock>=3.14.0
-
-# Linting & formatting
-ruff>=0.4.8
-
+pytest==8.2.2
+pytest-asyncio==0.23.7
+pytest-mock==3.14.0

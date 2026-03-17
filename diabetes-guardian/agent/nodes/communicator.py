@@ -1,139 +1,133 @@
 """
 agent/nodes/communicator.py
 
-Node 3: Communicator.
-Generates a personalized push notification message and delivers it to the user.
-Logs the intervention to the database.
+Node 3: Generate personalised push notification using LLM and send via NotificationService.
+Uses llm_communicator from agent.llm — never instantiates its own LLM.
 """
 
 import json
 from datetime import datetime
 
 import structlog
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from sqlalchemy.exc import SQLAlchemyError
 
+from agent.llm import get_llm_communicator
 from agent.state import AgentState
-from config import settings
-from db.models import AsyncSessionLocal, InterventionLog
-from gateway.services.notification import send_push
+from db.models import InterventionLog
+from db.session import AsyncSessionLocal
+from gateway.services.notification import NotificationService
 
 logger = structlog.get_logger(__name__)
 
-# Communicator prompt for generating user-facing messages
 COMMUNICATOR_PROMPT = """
-你是用户的健康伴侣。根据以下医学分析，生成一条推送通知。
-要求：
-- 语气温暖友好，risk_level=HIGH 时才可使用"注意"等词
-- 给出 1 个具体可执行的建议（如：吃什么、吃多少克）
-- 字数控制在 80 字以内
-- 必须提及当前血糖数值
+You are the user's personal health companion. Write a single mobile push notification
+in warm, natural English based on the clinical analysis provided.
+
+You will receive:
+- Current blood glucose value
+- Risk level (LOW / MEDIUM / HIGH)
+- Clinical reasoning summary (from Reflector — use as context, do NOT copy verbatim)
+- Projected mid-exercise glucose (if available)
+- Supplement recommendation with quantity (if available)
+
+Writing rules:
+1. Tone: friendly and conversational, like a message from a knowledgeable friend —
+   not a clinical warning system
+2. For risk_level HIGH: be more direct but remain calm; you may use "heads up" or "important"
+3. Always mention the current glucose value
+4. If supplement_recommendation is present, weave it naturally into the sentence —
+   do not list it as a bullet point
+5. If projected_glucose is present, use phrasing like
+   "if you head to the gym now, your glucose could drop to X"
+6. Keep the message under 60 words
+7. End with one short encouraging phrase (under 8 words)
 """
-
-# Max tokens per agent.md Section 6.3
-_COMMUNICATOR_MAX_TOKENS: int = 256
-
-
-def _build_communicator_prompt(state: AgentState) -> str:
-    """Build the input prompt for message generation from reflector outputs."""
-    task = state["task"]
-    parts = [
-        f"Risk level: {state.get('risk_level', 'UNKNOWN')}",
-        f"Clinical reasoning: {state.get('reasoning_summary', 'N/A')}",
-        f"Intervention type: {state.get('intervention_action', 'N/A')}",
-        f"Current glucose: {task.get('current_glucose', 'N/A')} mmol/L",
-        f"Location: {state.get('location_context', 'N/A')}",
-    ]
-
-    upcoming = state.get("upcoming_activity")
-    if upcoming:
-        parts.append(f"Upcoming activity: {upcoming}")
-
-    return "\n".join(parts)
-
-
-async def _log_intervention(state: AgentState, message: str) -> None:
-    """Persist the intervention record to the database."""
-    try:
-        async with AsyncSessionLocal() as session:
-            log_entry = InterventionLog(
-                user_id=state["user_id"],
-                triggered_at=datetime.fromisoformat(
-                    state["task"].get("trigger_at", datetime.utcnow().isoformat())
-                ),
-                trigger_type=state["task"].get("trigger_type"),
-                agent_decision=json.dumps(
-                    {
-                        "risk_level": state.get("risk_level"),
-                        "reasoning_summary": state.get("reasoning_summary"),
-                        "intervention_action": state.get("intervention_action"),
-                    },
-                    ensure_ascii=False,
-                ),
-                message_sent=message,
-            )
-            session.add(log_entry)
-            await session.commit()
-            logger.info(
-                "intervention_logged",
-                user_id=state["user_id"],
-                trigger_type=state["task"].get("trigger_type"),
-            )
-    except Exception as exc:
-        logger.error(
-            "intervention_log_failed",
-            user_id=state["user_id"],
-            error=str(exc),
-        )
 
 
 async def communicator_node(state: AgentState) -> dict:
-    """
-    Generate a personalized notification and send it to the user.
+    """Generate personalised push notification and send to user."""
+    task = state["task"]
+    user_id = state["user_id"]
 
-    Returns only the fields this node is responsible for (partial state update).
-    """
-    user_prompt = _build_communicator_prompt(state)
+    # Silent logging for NO_ACTION decisions
+    if state.get("intervention_action") == "NO_ACTION":
+        logger.info("communicator_silent_log", user_id=user_id, decision="NO_ACTION")
+        await _log_intervention(user_id, state, message="No notification needed due to safe projections.")
+        return {
+            "message_to_user": None,
+            "notification_sent": False,
+        }
+
+    user_prompt = (
+        f"current_glucose:           {task.get('current_glucose')}\n"
+        f"risk_level:                {state.get('risk_level')}\n"
+        f"reasoning_summary:         {state.get('reasoning_summary')}\n"
+        f"projected_glucose:         {state.get('projected_glucose')}\n"
+        f"supplement_recommendation: {state.get('supplement_recommendation')}\n"
+        f"upcoming_activity:         {state.get('upcoming_activity')}\n"
+    )
+
+    messages = [
+        SystemMessage(content=COMMUNICATOR_PROMPT),
+        HumanMessage(content=user_prompt),
+    ]
 
     try:
-        llm = ChatGoogleGenerativeAI(
-            model=settings.llm_model,
-            google_api_key=settings.google_api_key,
-            max_output_tokens=_COMMUNICATOR_MAX_TOKENS,
-            temperature=0.7,
-        )
-
-        messages = [
-            ("system", COMMUNICATOR_PROMPT),
-            ("human", user_prompt),
-        ]
-
+        llm = get_llm_communicator()
         response = await llm.ainvoke(messages)
         message = response.content.strip()
-
-    except Exception as exc:
-        logger.error(
-            "communicator_llm_failed",
-            user_id=state["user_id"],
-            error=str(exc),
-            fallback="template_message",
+    except Exception as e:
+        logger.error("communicator_llm_failed", user_id=user_id, error=str(e))
+        message = (
+            f"Your glucose is at {task.get('current_glucose')} mmol/L. "
+            "Please consider having a snack before your next activity. Stay safe!"
         )
-        # Fallback template message
-        glucose = state["task"].get("current_glucose", "N/A")
-        message = f"您当前血糖 {glucose} mmol/L，建议适当补充碳水化合物。"
 
     # Send push notification
-    await send_push(state["user_id"], message)
+    await NotificationService.send_push(user_id, message, state)
 
-    # Log the intervention
-    await _log_intervention(state, message)
+    # Write to intervention_log
+    await _log_intervention(user_id, state, message)
 
-    logger.info(
-        "communicator_complete",
-        user_id=state["user_id"],
-        message_length=len(message),
-    )
+    logger.info("communicator_sent", user_id=user_id, message_length=len(message))
 
     return {
         "message_to_user": message,
         "notification_sent": True,
     }
+
+
+async def _log_intervention(
+    user_id: str,
+    state: AgentState,
+    message: str,
+) -> None:
+    """Write soft trigger intervention to intervention_log."""
+    task = state["task"]
+
+    # Build agent_decision JSON from Reflector output
+    agent_decision = json.dumps({
+        "estimated_glucose_drop": state.get("estimated_glucose_drop"),
+        "risk_level": state.get("risk_level"),
+        "reasoning_summary": state.get("reasoning_summary"),
+        "projected_glucose": state.get("projected_glucose"),
+        "intervention_action": state.get("intervention_action"),
+        "supplement_recommendation": state.get("supplement_recommendation"),
+        "confidence": state.get("reflector_confidence"),
+    })
+
+    try:
+        async with AsyncSessionLocal() as session:
+            record = InterventionLog(
+                user_id=user_id,
+                triggered_at=datetime.now(),
+                trigger_type=task.get("trigger_type"),
+                display_label=None,  # soft triggers have no display_label
+                agent_decision=agent_decision,
+                message_sent=message,
+            )
+            session.add(record)
+            await session.commit()
+    except SQLAlchemyError as e:
+        logger.error("intervention_log_failed", user_id=user_id, error=str(e))

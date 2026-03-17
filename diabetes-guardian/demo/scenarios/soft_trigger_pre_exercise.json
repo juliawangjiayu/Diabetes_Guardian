@@ -1,0 +1,18 @@
+{
+  "scenario_id": "soft_trigger_pre_exercise",
+  "description": "Pre-exercise low buffer: glucose in [4.0, 5.6] within 60 min of workout",
+  "prerequisite": "user_weekly_patterns must have resistance_training on the same day_of_week as scenario_base_time; DEMO_MODE=true",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/hr",
+      "body": {"heart_rate": 72, "gps_lat": 1.3200, "gps_lng": 103.8400}
+    },
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/cgm",
+      "body": {"glucose": 4.9}
+    }
+  ],
+  "expected_outcome": "SOFT_TRIGGER (SOFT_PRE_EXERCISE_LOW_BUFFER) → Agent → SOFT_REMIND push notification"
+}

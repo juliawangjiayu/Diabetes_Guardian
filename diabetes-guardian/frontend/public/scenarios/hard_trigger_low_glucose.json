@@ -1,0 +1,18 @@
+{
+  "scenario_id": "hard_trigger_low_glucose",
+  "description": "Hard trigger: CGM reports glucose < 3.9 mmol/L",
+  "prerequisite": "user_emergency_contacts must have at least one contact with notify_on containing 'hard_low_glucose'",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/hr",
+      "body": {"heart_rate": 72, "gps_lat": 1.3521, "gps_lng": 103.8198}
+    },
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/cgm",
+      "body": {"glucose": 3.5}
+    }
+  ],
+  "expected_outcome": "HARD_TRIGGER → EmergencyService.fire → App push + SMS + Twilio call"
+}

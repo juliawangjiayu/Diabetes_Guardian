@@ -1,24 +1,24 @@
 """
 agent/nodes/investigator.py
 
-Node 1: Investigator.
-Concurrently calls Patient History MCP and Location Context MCP servers
-to gather contextual data for the Reflector node.
+Node 1: Pure data-fetch node. No computation or reasoning.
+Concurrently calls all three local tool functions and returns structured data for Reflector.
 """
 
 import asyncio
-
-import httpx
 import structlog
 
 from agent.state import AgentState
+from agent.tools.emotion_context_tool import get_emotion_context
+from agent.tools.location_context_tool import get_semantic_location
+from agent.tools.patient_history_tool import get_patient_context
 from config import settings
 
 logger = structlog.get_logger(__name__)
 
-# Fallback values per agent.md Section 3.3
+# Default fallback values per spec
 _LOCATION_FALLBACK: dict = {
-    "semantic_location": "未知位置",
+    "semantic_location": "unknown location",
     "is_at_home": False,
     "nearby_known_places": [],
 }
@@ -26,48 +26,60 @@ _LOCATION_FALLBACK: dict = {
 _HISTORY_FALLBACK: dict = {
     "glucose_history_24h": [],
     "upcoming_activity": None,
-    "recent_exercise_drops": [],
+    "exercise_history": [],
+    "user_profile": None,
+    "today_calories_burned": 0.0,
+    "glucose_daily_stats": None,
+    "glucose_weekly_profile": None,
 }
 
 
+async def investigator_node(state: AgentState) -> dict:
+    """Fetch all context data concurrently from MCP servers."""
+    task = state["task"]
+    user_id = task["user_id"]
+
+    location, history, emotion = await asyncio.gather(
+        call_location_context_mcp(
+            task.get("gps_lat"),
+            task.get("gps_lng"),
+            user_id,
+        ),
+        call_patient_history_mcp(user_id, task.get("trigger_at", "")),
+        call_emotion_context_mcp(user_id),
+    )
+
+    # Resolve null emotion to default
+    if emotion is None:
+        emotion = {"emotion_label": "unknown"}
+
+    return {
+        "location_context": location.get("semantic_location", "unknown location"),
+        "glucose_history_24h": history.get("glucose_history_24h", []),
+        "upcoming_activity": history.get("upcoming_activity"),
+        "exercise_history": history.get("exercise_history", []),
+        "user_profile": history.get("user_profile"),
+        "today_calories_burned": history.get("today_calories_burned", 0.0),
+        "emotion_context": emotion,
+        "glucose_daily_stats": history.get("glucose_daily_stats"),
+        "glucose_weekly_profile": history.get("glucose_weekly_profile"),
+    }
+
+
 async def call_location_context_mcp(
-    lat: float,
-    lng: float,
+    lat: float | None,
+    lng: float | None,
     user_id: str,
 ) -> dict:
-    """Call the Location Context MCP server to resolve semantic location."""
-    url = f"{settings.location_context_mcp_url}/tools/get_semantic_location"
+    """Call Location Context tool to resolve GPS to semantic location."""
+    if lat is None or lng is None:
+        return _LOCATION_FALLBACK
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                url,
-                json={"user_id": user_id, "lat": lat, "lng": lng},
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.TimeoutException:
-        logger.warning(
-            "mcp_timeout",
-            service="location_context",
-            url=url,
-            user_id=user_id,
-        )
-        return _LOCATION_FALLBACK
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "mcp_http_error",
-            service="location_context",
-            status=exc.response.status_code,
-            user_id=user_id,
-        )
-        return _LOCATION_FALLBACK
-    except Exception as exc:
-        logger.error(
-            "mcp_unexpected_error",
-            service="location_context",
-            error=str(exc),
-            user_id=user_id,
-        )
+        data = await get_semantic_location(user_id, lat, lng)
+        return data if data else _LOCATION_FALLBACK
+    except Exception as e:
+        logger.error("tool_error", service="location_context", error=str(e))
         return _LOCATION_FALLBACK
 
 
@@ -75,70 +87,19 @@ async def call_patient_history_mcp(
     user_id: str,
     reference_time: str,
 ) -> dict:
-    """Call the Patient History MCP server to retrieve patient context."""
-    url = f"{settings.patient_history_mcp_url}/tools/get_patient_context"
+    """Call Patient History tool to fetch glucose history, profile, and stats."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.post(
-                url,
-                json={"user_id": user_id, "reference_time": reference_time},
-            )
-            response.raise_for_status()
-            return response.json()
-    except httpx.TimeoutException:
-        logger.warning(
-            "mcp_timeout",
-            service="patient_history",
-            url=url,
-            user_id=user_id,
-        )
-        return _HISTORY_FALLBACK
-    except httpx.HTTPStatusError as exc:
-        logger.error(
-            "mcp_http_error",
-            service="patient_history",
-            status=exc.response.status_code,
-            user_id=user_id,
-        )
-        return _HISTORY_FALLBACK
-    except Exception as exc:
-        logger.error(
-            "mcp_unexpected_error",
-            service="patient_history",
-            error=str(exc),
-            user_id=user_id,
-        )
+        data = await get_patient_context(user_id, reference_time)
+        return data if data else _HISTORY_FALLBACK
+    except Exception as e:
+        logger.error("tool_error", service="patient_history", error=str(e))
         return _HISTORY_FALLBACK
 
 
-async def investigator_node(state: AgentState) -> dict:
-    """
-    Gather contextual data by concurrently querying MCP servers.
-
-    Returns only the fields this node is responsible for (partial state update).
-    """
-    task = state["task"]
-
-    # Concurrent MCP calls per agent.md Section 3.2
-    location_result, history_result = await asyncio.gather(
-        call_location_context_mcp(
-            task["gps_lat"], task["gps_lng"], task["user_id"]
-        ),
-        call_patient_history_mcp(task["user_id"], task["trigger_at"]),
-    )
-
-    logger.info(
-        "investigator_complete",
-        user_id=state["user_id"],
-        location=location_result.get("semantic_location"),
-        history_records=len(history_result.get("glucose_history_24h", [])),
-    )
-
-    return {
-        "location_context": location_result["semantic_location"],
-        "glucose_history_24h": history_result["glucose_history_24h"],
-        "upcoming_activity": history_result.get("upcoming_activity"),
-        "recent_exercise_glucose_drops": history_result.get(
-            "recent_exercise_drops", []
-        ),
-    }
+async def call_emotion_context_mcp(user_id: str) -> dict | None:
+    """Call Emotion Context tool to fetch most recent emotion within 2h window."""
+    try:
+        return await get_emotion_context(user_id)
+    except Exception as e:
+        logger.error("tool_error", service="emotion_context", error=str(e))
+        return None

@@ -1,0 +1,13 @@
+{
+  "scenario_id": "hard_trigger_high_hr",
+  "description": "Hard trigger: Heart rate exceeds (220 - age) * 0.90 threshold",
+  "prerequisite": "users.birth_year must be set (e.g. 1990 → age 36 → max HR 165.6); emergency contact with notify_on containing 'hard_high_hr'",
+  "steps": [
+    {
+      "offset_minutes": 0,
+      "endpoint": "POST /telemetry/hr",
+      "body": {"heart_rate": 185, "gps_lat": 1.3521, "gps_lng": 103.8198}
+    }
+  ],
+  "expected_outcome": "HARD_TRIGGER → EmergencyService.fire → App push + SMS + Twilio call"
+}
